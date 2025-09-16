@@ -1,0 +1,30 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: self-hosted  # jouw runner-EC2
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Login to ECR
+      run: |
+        aws ecr get-login-password --region eu-central-1 \
+        | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.eu-central-1.amazonaws.com
+
+    - name: Build, Tag, Push
+      run: |
+        docker build -t innovatech-web .
+        docker tag innovatech-web:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.eu-central-1.amazonaws.com/innovatech-web:latest
+        docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.eu-central-1.amazonaws.com/innovatech-web:latest
+
+    - name: Update ECS Service
+      run: |
+        aws ecs update-service \
+          --cluster innovatech-cluster \
+          --service webapp-svc \
+          --force-new-deployment \
+          --region eu-central-1
