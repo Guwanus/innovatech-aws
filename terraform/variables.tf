@@ -40,6 +40,7 @@ variable "tags" {
     Env     = "dev"
   }
 }
+
 # ---- RDS variabelen ----
 variable "db_instance_class" {
   type    = string
@@ -73,4 +74,30 @@ variable "db_username" {
 variable "db_password" {
   type      = string
   sensitive = true
+}
+
+# ---- Auto Scaling variabelen ----
+variable "asg_desired" {
+  type    = number
+  default = 2
+}
+
+variable "asg_min" {
+  type    = number
+  default = 2
+}
+
+variable "asg_max" {
+  type    = number
+  default = 6
+}
+
+variable "asg_cpu_target_percent" {
+  type    = number
+  default = 50
+}
+
+variable "asg_req_per_target" {
+  type    = number
+  default = 100
 }

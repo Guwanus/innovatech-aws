@@ -162,92 +162,6 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# -------------- EC2 Webservers --------------
-data "aws_ami" "al2023" {
-  most_recent = true
-  owners      = ["137112412989"] # Amazon
-  filter {
-    name   = "name"
-    values = ["al2023-ami-*-x86_64"]
-  }
-}
-
-# RDS endpoint in user_data -> web instances wachten automatisch tot DB gepland is
-locals {
-  user_data = <<-EOT
-    #!/bin/bash
-    set -eux
-    dnf update -y
-    dnf install -y nginx
-
-    # .env met DB-gegevens voor je app
-    install -d -m 0755 /etc/app
-    cat >/etc/app/.env <<EOF
-    DB_HOST=${aws_db_instance.db.address}
-    DB_NAME=${var.db_name}
-    DB_USER=${var.db_username}
-    DB_PASS=${var.db_password}
-    EOF
-    chmod 600 /etc/app/.env
-
-    # Demo HTML
-    cat >/usr/share/nginx/html/index.html <<HTML
-    <html><body style="font-family: Arial; margin: 2rem;">
-      <h1>${var.name} - Hello from $(hostname)</h1>
-      <p>AZ: $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>
-      <h3>Database connection (for app):</h3>
-      <pre>/etc/app/.env</pre>
-    </body></html>
-    HTML
-
-    systemctl enable --now nginx
-  EOT
-}
-
-resource "aws_instance" "web_a" {
-  ami                         = data.aws_ami.al2023.id
-  instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.public_a.id
-  vpc_security_group_ids      = [aws_security_group.web.id]
-  associate_public_ip_address = true
-  user_data                   = local.user_data
-
-  root_block_device {
-    volume_size = 8
-    volume_type = "gp3"
-  }
-
-  tags = merge(var.tags, { Name = "${var.name}-web-a", Role = "web" })
-}
-
-resource "aws_instance" "web_b" {
-  ami                         = data.aws_ami.al2023.id
-  instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.public_b.id
-  vpc_security_group_ids      = [aws_security_group.web.id]
-  associate_public_ip_address = true
-  user_data                   = local.user_data
-
-  root_block_device {
-    volume_size = 8
-    volume_type = "gp3"
-  }
-
-  tags = merge(var.tags, { Name = "${var.name}-web-b", Role = "web" })
-}
-
-# Koppel beide instances aan de target group
-resource "aws_lb_target_group_attachment" "a" {
-  target_group_arn = aws_lb_target_group.tg.arn
-  target_id        = aws_instance.web_a.id
-  port             = 80
-}
-resource "aws_lb_target_group_attachment" "b" {
-  target_group_arn = aws_lb_target_group.tg.arn
-  target_id        = aws_instance.web_b.id
-  port             = 80
-}
-
 # -------------- RDS Postgres --------------
 resource "aws_db_subnet_group" "db" {
   name       = "${var.name}-db-subnets"
@@ -288,4 +202,138 @@ resource "aws_db_instance" "db" {
   performance_insights_enabled = false
 
   tags = merge(var.tags, { Name = "${var.name}-pg" })
+}
+
+# -------------- Launch Template + Auto Scaling Group --------------
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["137112412989"] # Amazon
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+}
+
+# User data (schrijft DB-gegevens en demo HTML)
+locals {
+  user_data = <<-EOT
+    #!/bin/bash
+    set -eux
+    dnf update -y
+    dnf install -y nginx
+
+    # .env met DB-gegevens voor je app
+    install -d -m 0755 /etc/app
+    cat >/etc/app/.env <<EOF
+    DB_HOST=${aws_db_instance.db.address}
+    DB_NAME=${var.db_name}
+    DB_USER=${var.db_username}
+    DB_PASS=${var.db_password}
+    EOF
+    chmod 600 /etc/app/.env
+
+    # Demo HTML
+    cat >/usr/share/nginx/html/index.html <<HTML
+    <html><body style="font-family: Arial; margin: 2rem;">
+      <h1>${var.name} - Hello from $(hostname)</h1>
+      <p>AZ: $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>
+      <h3>Database connection (for app):</h3>
+      <pre>/etc/app/.env</pre>
+    </body></html>
+    HTML
+
+    systemctl enable --now nginx
+  EOT
+}
+
+resource "aws_launch_template" "web" {
+  name_prefix   = "${var.name}-lt-"
+  image_id      = data.aws_ami.al2023.id
+  instance_type = var.instance_type
+
+  vpc_security_group_ids = [aws_security_group.web.id]
+  user_data              = base64encode(local.user_data)
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      volume_size           = 8
+      volume_type           = "gp3"
+      delete_on_termination = true
+      encrypted             = true
+    }
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(var.tags, {
+      Name = "${var.name}-web"
+      Role = "web"
+    })
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_autoscaling_group" "web" {
+  name                      = "${var.name}-asg"
+  min_size                  = var.asg_min
+  desired_capacity          = var.asg_desired
+  max_size                  = var.asg_max
+  vpc_zone_identifier       = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+  target_group_arns         = [aws_lb_target_group.tg.arn]
+  health_check_type         = "ELB"
+  health_check_grace_period = 60
+
+  launch_template {
+    id      = aws_launch_template.web.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${var.name}-web"
+    propagate_at_launch = true
+  }
+
+  dynamic "tag" {
+    for_each = var.tags
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Target tracking scaling policies
+resource "aws_autoscaling_policy" "cpu" {
+  name                   = "${var.name}-cpu-tt"
+  autoscaling_group_name = aws_autoscaling_group.web.name
+  policy_type            = "TargetTrackingScaling"
+  target_tracking_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ASGAverageCPUUtilization"
+    }
+    target_value = var.asg_cpu_target_percent
+  }
+}
+
+resource "aws_autoscaling_policy" "req" {
+  name                   = "${var.name}-req-tt"
+  autoscaling_group_name = aws_autoscaling_group.web.name
+  policy_type            = "TargetTrackingScaling"
+  target_tracking_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      resource_label         = "${aws_lb.app.arn_suffix}/${aws_lb_target_group.tg.arn_suffix}"
+    }
+    target_value = var.asg_req_per_target
+  }
 }
