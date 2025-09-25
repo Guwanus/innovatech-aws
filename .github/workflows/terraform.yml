@@ -1,0 +1,72 @@
+name: Terraform Deploy to AWS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    # Omgevingsvariabelen voor Terraform
+    env:
+      TF_IN_AUTOMATION: true
+      # Geef verplichte variabelen door aan Terraform:
+      TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+      TF_VAR_region:      ${{ secrets.AWS_REGION }}
+      # Let op: GEEN AWS_PROFILE zetten
+
+    # Draai Terraform in de map waar je .tf-bestanden staan
+    defaults:
+      run:
+        shell: bash
+        working-directory: terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.2
+
+      - name: Configure AWS Credentials (with session token)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Ensure no AWS_PROFILE is set
+        run: |
+          unset AWS_PROFILE || true
+          echo "AWS_PROFILE cleared (was: ${AWS_PROFILE-<unset>})"
+
+      - name: Sanity check identity & config presence
+        run: |
+          aws sts get-caller-identity
+          echo "Region: ${{ secrets.AWS_REGION }}"
+          echo "Listing Terraform files in $(pwd):"
+          ls -1 *.tf
+
+      # Gebruik dit als je een backend.hcl hebt; anders blijft 'terraform init' prima werken.
+      - name: Terraform Init
+        run: |
+          if [ -f "backend.hcl" ]; then
+            terraform init -reconfigure -upgrade -backend-config=backend.hcl
+          else
+            terraform init -reconfigure -upgrade
+          fi
+
+      - name: Terraform Validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        run: terraform plan -no-color -input=false -out=tfplan
+
+      - name: Terraform Apply (only on main)
+        if: github.ref == 'refs/heads/main'
+        run: terraform apply -no-color -input=false -auto-approve tfplan
