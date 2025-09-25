@@ -239,7 +239,7 @@ HOST="$(hostname)"
 # Demo HTML
 cat >/usr/share/nginx/html/index.html <<HTML
 <html><body style="font-family: Arial; margin: 2rem;">
-  <h1>${var.name} - Hello from ${HOST}</h1>
+  <h1>${var.name} - Hello from $${HOST}</h1>
   <p>AZ: $${AZ}</p>
   <h3>Database connection (for app):</h3>
   <pre>/etc/app/.env</pre>
