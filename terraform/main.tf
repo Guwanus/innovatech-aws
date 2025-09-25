@@ -85,14 +85,14 @@ resource "aws_security_group" "web" {
     description     = "HTTP from ALB"
   }
 
-  # (Optioneel) SSH vanaf jouw IP
-  # ingress {
-  #   from_port   = 22
-  #   to_port     = 22
-  #   protocol    = "tcp"
-  #   cidr_blocks = ["YOUR.PUBLIC.IP.ADDR/32"]
-  #   description = "SSH from your IP"
-  # }
+  # (Optioneel) SSH (beperk in productie!)
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "SSH from your IP"
+  }
 
   egress {
     from_port   = 0
@@ -165,7 +165,7 @@ resource "aws_lb_listener" "http" {
 # -------------- RDS Postgres --------------
 resource "aws_db_subnet_group" "db" {
   name       = "${var.name}-db-subnets"
-  subnet_ids = [aws_subnet.public_a.id, aws_subnet.public_b.id] # simpel: dezelfde 2 AZ's
+  subnet_ids = [aws_subnet.public_a.id, aws_subnet.public_b.id] # simpel
   tags       = merge(var.tags, { Name = "${var.name}-db-subnets" })
 }
 
@@ -214,36 +214,84 @@ data "aws_ami" "al2023" {
   }
 }
 
-# User data (schrijft DB-gegevens en demo HTML)
+# User data (nginx + Prometheus)
 locals {
   user_data = <<-EOT
-    #!/bin/bash
-    set -eux
-    dnf update -y
-    dnf install -y nginx
+#!/bin/bash
+set -eux
+dnf update -y
+dnf install -y nginx curl tar
 
-    # .env met DB-gegevens voor je app
-    install -d -m 0755 /etc/app
-    cat >/etc/app/.env <<EOF
-    DB_HOST=${aws_db_instance.db.address}
-    DB_NAME=${var.db_name}
-    DB_USER=${var.db_username}
-    DB_PASS=${var.db_password}
-    EOF
-    chmod 600 /etc/app/.env
+# .env met DB-gegevens voor je app
+install -d -m 0755 /etc/app
+cat >/etc/app/.env <<EOF
+DB_HOST=${aws_db_instance.db.address}
+DB_NAME=${var.db_name}
+DB_USER=${var.db_username}
+DB_PASS=${var.db_password}
+EOF
+chmod 600 /etc/app/.env
 
-    # Demo HTML
-    cat >/usr/share/nginx/html/index.html <<HTML
-    <html><body style="font-family: Arial; margin: 2rem;">
-      <h1>${var.name} - Hello from $(hostname)</h1>
-      <p>AZ: $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>
-      <h3>Database connection (for app):</h3>
-      <pre>/etc/app/.env</pre>
-    </body></html>
-    HTML
+# Demo HTML
+cat >/usr/share/nginx/html/index.html <<HTML
+<html><body style="font-family: Arial; margin: 2rem;">
+  <h1>${var.name} - Hello from $(hostname)</h1>
+  <p>AZ: $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>
+  <h3>Database connection (for app):</h3>
+  <pre>/etc/app/.env</pre>
+</body></html>
+HTML
 
-    systemctl enable --now nginx
-  EOT
+systemctl enable --now nginx
+
+# -----------------------------
+# Install Prometheus (systemd)
+# -----------------------------
+useradd --no-create-home --shell /usr/sbin/nologin prometheus || true
+mkdir -p /etc/prometheus /var/lib/prometheus
+
+cd /tmp
+curl -sL -o prometheus.tar.gz https://github.com/prometheus/prometheus/releases/download/v${var.prometheus_version}/prometheus-${var.prometheus_version}.linux-amd64.tar.gz
+tar -xzf prometheus.tar.gz
+cd prometheus-${var.prometheus_version}.linux-amd64
+
+install -m 0755 prometheus /usr/local/bin/prometheus
+install -m 0755 promtool /usr/local/bin/promtool
+install -m 0644 prometheus.yml /etc/prometheus/prometheus.yml
+install -Dm 0644 consoles/* -t /etc/prometheus/consoles
+install -Dm 0644 console_libraries/* -t /etc/prometheus/console_libraries
+
+chown -R prometheus:prometheus /etc/prometheus /var/lib/prometheus
+
+cat >/etc/systemd/system/prometheus.service <<'SERVICE'
+[Unit]
+Description=Prometheus
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --storage.tsdb.path=/var/lib/prometheus \
+  --web.listen-address=0.0.0.0:9090 \
+  --storage.tsdb.retention.time=15d
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+systemctl daemon-reload
+systemctl enable --now prometheus
+
+if command -v firewall-cmd >/dev/null 2>&1; then
+  firewall-cmd --add-port=9090/tcp --permanent || true
+  firewall-cmd --reload || true
+fi
+EOT
 }
 
 resource "aws_launch_template" "web" {
@@ -252,7 +300,8 @@ resource "aws_launch_template" "web" {
   instance_type = var.instance_type
 
   vpc_security_group_ids = [aws_security_group.web.id]
-  user_data              = base64encode(local.user_data)
+  # Enkele base64-encode (OK voor Launch Template)
+  user_data = base64encode(local.user_data)
 
   block_device_mappings {
     device_name = "/dev/xvda"
@@ -335,5 +384,15 @@ resource "aws_autoscaling_policy" "req" {
       resource_label         = "${aws_lb.app.arn_suffix}/${aws_lb_target_group.tg.arn_suffix}"
     }
     target_value = var.asg_req_per_target
+  }
+}
+
+# ---------------- Grafana EC2 (self-hosted) ----------------
+data "aws_ami" "al2023_grafana" {
+  most_recent = true
+  owners      = ["137112412989"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
   }
 }
