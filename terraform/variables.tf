@@ -3,11 +3,6 @@ variable "region" {
   default = "eu-central-1" # Frankfurt
 }
 
-variable "aws_profile" {
-  type    = string
-  default = "school" # of bv. "student" als je via AWS SSO/CLI profiel werkt
-}
-
 variable "name" {
   type    = string
   default = "innovatech"
