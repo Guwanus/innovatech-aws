@@ -85,7 +85,7 @@ resource "aws_security_group" "web" {
     description     = "HTTP from ALB"
   }
 
-  # (Optioneel) SSH (beperk in productie!)
+  # (Optioneel) SSH vanaf jouw IP
   ingress {
     from_port   = 22
     to_port     = 22
@@ -165,7 +165,7 @@ resource "aws_lb_listener" "http" {
 # -------------- RDS Postgres --------------
 resource "aws_db_subnet_group" "db" {
   name       = "${var.name}-db-subnets"
-  subnet_ids = [aws_subnet.public_a.id, aws_subnet.public_b.id] # simpel
+  subnet_ids = [aws_subnet.public_a.id, aws_subnet.public_b.id] # simpel: dezelfde 2 AZ's
   tags       = merge(var.tags, { Name = "${var.name}-db-subnets" })
 }
 
@@ -214,86 +214,113 @@ data "aws_ami" "al2023" {
   }
 }
 
-# User data (nginx + Prometheus)
+# User data (schrijft DB-gegevens en demo HTML)
 locals {
   user_data = <<-EOT
-#!/bin/bash
-set -eux
-dnf update -y
-dnf install -y nginx curl tar
+    #!/bin/bash
+    set -eux
+    dnf update -y
+    dnf install -y nginx
 
-# .env met DB-gegevens voor je app
-install -d -m 0755 /etc/app
-cat >/etc/app/.env <<EOF
-DB_HOST=${aws_db_instance.db.address}
-DB_NAME=${var.db_name}
-DB_USER=${var.db_username}
-DB_PASS=${var.db_password}
-EOF
-chmod 600 /etc/app/.env
+    # --- Install Prometheus & Node Exporter ---
+    PROM_VERSION="2.53.1"
+    NODE_EXPORTER_VERSION="1.8.2"
+    useradd --no-create-home --shell /bin/false prometheus || true
+    useradd --no-create-home --shell /bin/false node_exporter || true
+    install -d -o prometheus -g prometheus /etc/prometheus /var/lib/prometheus
 
-# Veilig AZ/host ophalen (faalt niet als curl niet werkt)
-AZ="$(curl -sf http://169.254.169.254/latest/meta-data/placement/availability-zone || echo unknown)"
-HOST="$(hostname)"
+    curl -L -o /tmp/prometheus.tar.gz "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+    tar -xzf /tmp/prometheus.tar.gz -C /tmp
+    cp /tmp/prometheus-${PROM_VERSION}.linux-amd64/prometheus /usr/local/bin/
+    cp /tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool /usr/local/bin/
+    cp -r /tmp/prometheus-${PROM_VERSION}.linux-amd64/consoles /etc/prometheus/
+    cp -r /tmp/prometheus-${PROM_VERSION}.linux-amd64/console_libraries /etc/prometheus/
+    chown -R prometheus:prometheus /etc/prometheus /var/lib/prometheus
 
-# Demo HTML
-cat >/usr/share/nginx/html/index.html <<HTML
-<html><body style="font-family: Arial; margin: 2rem;">
-  <h1>${var.name} - Hello from $${HOST}</h1>
-  <p>AZ: $${AZ}</p>
-  <h3>Database connection (for app):</h3>
-  <pre>/etc/app/.env</pre>
-</body></html>
-HTML
+    cat >/etc/prometheus/prometheus.yml <<'PYML'
+    global:
+      scrape_interval: 10s
+    scrape_configs:
+      - job_name: "self"
+        static_configs:
+        - targets: ["localhost:9090"]
+      - job_name: "node"
+        static_configs:
+        - targets: ["localhost:9100"]
+    PYML
+    chown prometheus:prometheus /etc/prometheus/prometheus.yml
+    chmod 640 /etc/prometheus/prometheus.yml
 
-systemctl enable --now nginx
+    cat >/etc/systemd/system/prometheus.service <<'PSVC'
+    [Unit]
+    Description=Prometheus
+    Wants=network-online.target
+    After=network-online.target
 
-# ------- Prometheus (zoals jij 'm had) -------
-useradd --no-create-home --shell /usr/sbin/nologin prometheus || true
-mkdir -p /etc/prometheus /var/lib/prometheus
+    [Service]
+    User=prometheus
+    Group=prometheus
+    Type=simple
+    ExecStart=/usr/local/bin/prometheus \
+      --config.file=/etc/prometheus/prometheus.yml \
+      --storage.tsdb.path=/var/lib/prometheus \
+      --web.listen-address=0.0.0.0:9090
+    Restart=on-failure
 
-cd /tmp
-curl -sL -o prometheus.tar.gz https://github.com/prometheus/prometheus/releases/download/v${var.prometheus_version}/prometheus-${var.prometheus_version}.linux-amd64.tar.gz
-tar -xzf prometheus.tar.gz
-cd prometheus-${var.prometheus_version}.linux-amd64
+    [Install]
+    WantedBy=multi-user.target
+    PSVC
 
-install -m 0755 prometheus /usr/local/bin/prometheus
-install -m 0755 promtool /usr/local/bin/promtool
-install -m 0644 prometheus.yml /etc/prometheus/prometheus.yml
-install -Dm 0644 consoles/* -t /etc/prometheus/consoles
-install -Dm 0644 console_libraries/* -t /etc/prometheus/console_libraries
+    # Node Exporter
+    curl -L -o /tmp/node_exporter.tar.gz "https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
+    tar -xzf /tmp/node_exporter.tar.gz -C /tmp
+    cp /tmp/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter /usr/local/bin/
+    useradd --no-create-home --shell /bin/false node_exporter || true
 
-chown -R prometheus:prometheus /etc/prometheus /var/lib/prometheus
+    cat >/etc/systemd/system/node_exporter.service <<'NESVC'
+    [Unit]
+    Description=Prometheus Node Exporter
+    Wants=network-online.target
+    After=network-online.target
 
-cat >/etc/systemd/system/prometheus.service <<'SERVICE'
-[Unit]
-Description=Prometheus
-Wants=network-online.target
-After=network-online.target
+    [Service]
+    User=node_exporter
+    Group=node_exporter
+    Type=simple
+    ExecStart=/usr/local/bin/node_exporter
+    Restart=on-failure
 
-[Service]
-User=prometheus
-Group=prometheus
-Type=simple
-ExecStart=/usr/local/bin/prometheus \
-  --config.file=/etc/prometheus/prometheus.yml \
-  --storage.tsdb.path=/var/lib/prometheus \
-  --web.listen-address=0.0.0.0:9090 \
-  --storage.tsdb.retention.time=15d
-Restart=on-failure
+    [Install]
+    WantedBy=multi-user.target
+    NESVC
 
-[Install]
-WantedBy=multi-user.target
-SERVICE
+    systemctl daemon-reload
+    systemctl enable --now prometheus.service
+    systemctl enable --now node_exporter.service
+    # --- End Prometheus setup ---
 
-systemctl daemon-reload
-systemctl enable --now prometheus
+    # .env met DB-gegevens voor je app
+    install -d -m 0755 /etc/app
+    cat >/etc/app/.env <<EOF
+    DB_HOST=${aws_db_instance.db.address}
+    DB_NAME=${var.db_name}
+    DB_USER=${var.db_username}
+    DB_PASS=${var.db_password}
+    EOF
+    chmod 600 /etc/app/.env
 
-if command -v firewall-cmd >/dev/null 2>&1; then
-  firewall-cmd --add-port=9090/tcp --permanent || true
-  firewall-cmd --reload || true
-fi
-EOT
+    # Demo HTML
+    cat >/usr/share/nginx/html/index.html <<HTML
+    <html><body style="font-family: Arial; margin: 2rem;">
+      <h1>${var.name} - Hello from $(hostname)</h1>
+      <p>AZ: $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>
+      <h3>Database connection (for app):</h3>
+      <pre>/etc/app/.env</pre>
+    </body></html>
+    HTML
+
+    systemctl enable --now nginx
+  EOT
 }
 
 resource "aws_launch_template" "web" {
@@ -302,8 +329,7 @@ resource "aws_launch_template" "web" {
   instance_type = var.instance_type
 
   vpc_security_group_ids = [aws_security_group.web.id]
-  # Enkele base64-encode (OK voor Launch Template)
-  user_data = base64encode(local.user_data)
+  user_data              = base64encode(local.user_data)
 
   block_device_mappings {
     device_name = "/dev/xvda"
@@ -361,17 +387,7 @@ resource "aws_autoscaling_group" "web" {
   lifecycle {
     create_before_destroy = true
   }
-
-  instance_refresh {
-    strategy = "Rolling"
-    preferences {
-      min_healthy_percentage = 90
-      instance_warmup        = 60
-    }
-    triggers = ["launch_template"]
-  }
 }
-
 
 # Target tracking scaling policies
 resource "aws_autoscaling_policy" "cpu" {
@@ -399,12 +415,99 @@ resource "aws_autoscaling_policy" "req" {
   }
 }
 
-# ---------------- Grafana EC2 (self-hosted) ----------------
-data "aws_ami" "al2023_grafana" {
+
+# -------------- Grafana --------------
+resource "aws_security_group" "grafana" {
+  name        = "${var.name}-grafana-sg"
+  description = "Allow Grafana (3000) and outbound internet"
+  vpc_id      = aws_vpc.this.id
+
+  ingress {
+    description = "Grafana UI"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # adjust if needed
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  tags = merge(var.tags, { Name = "${var.name}-grafana-sg" })
+}
+
+# Allow Grafana to scrape Prometheus on web servers (port 9090)
+resource "aws_security_group_rule" "web_allow_prometheus_from_grafana" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.web.id
+  from_port                = 9090
+  to_port                  = 9090
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.grafana.id
+  description              = "Allow Grafana to reach Prometheus on web (9090)"
+}
+
+data "aws_ami" "ubuntu_2204" {
   most_recent = true
-  owners      = ["137112412989"]
+  owners      = ["099720109477"] # Canonical
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+resource "aws_instance" "grafana" {
+  ami                    = data.aws_ami.ubuntu_2204.id
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.public_a.id
+  vpc_security_group_ids = [aws_security_group.grafana.id]
+  associate_public_ip_address = true
+
+  user_data = <<-EOT
+    #!/bin/bash
+    set -eux
+    apt-get update -y
+    apt-get install -y apt-transport-https software-properties-common wget
+
+    # Install Grafana OSS
+    wget -q -O - https://packages.grafana.com/gpg.key | apt-key add -
+    add-apt-repository "deb https://packages.grafana.com/oss/deb stable main"
+    apt-get update -y
+    apt-get install -y grafana
+    systemctl enable --now grafana-server
+
+    # Optional: pre-create a Prometheus datasource placeholder (you can edit IPs later)
+    cat >/etc/grafana/provisioning/datasources/prometheus.yaml <<'YAML'
+    apiVersion: 1
+    datasources:
+      - name: Web Prometheus
+        type: prometheus
+        access: proxy
+        url: http://CHANGE_ME_WEB_IP:9090
+        isDefault: true
+    YAML
+    systemctl restart grafana-server
+  EOT
+
+  tags = merge(var.tags, { Name = "${var.name}-grafana" })
+}
+
+output "grafana_public_ip" {
+  description = "Public IP of the Grafana server"
+  value       = aws_instance.grafana.public_ip
+}
+
+output "grafana_url" {
+  description = "Grafana UI URL"
+  value       = "http://${aws_instance.grafana.public_ip}:3000"
 }
