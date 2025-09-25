@@ -229,12 +229,12 @@ locals {
     useradd --no-create-home --shell /bin/false node_exporter || true
     install -d -o prometheus -g prometheus /etc/prometheus /var/lib/prometheus
 
-    curl -L -o /tmp/prometheus.tar.gz "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+    curl -L -o /tmp/prometheus.tar.gz "https://github.com/prometheus/prometheus/releases/download/v$${PROM_VERSION}/prometheus-$${PROM_VERSION}.linux-amd64.tar.gz"
     tar -xzf /tmp/prometheus.tar.gz -C /tmp
-    cp /tmp/prometheus-${PROM_VERSION}.linux-amd64/prometheus /usr/local/bin/
-    cp /tmp/prometheus-${PROM_VERSION}.linux-amd64/promtool /usr/local/bin/
-    cp -r /tmp/prometheus-${PROM_VERSION}.linux-amd64/consoles /etc/prometheus/
-    cp -r /tmp/prometheus-${PROM_VERSION}.linux-amd64/console_libraries /etc/prometheus/
+    cp /tmp/prometheus-$${PROM_VERSION}.linux-amd64/prometheus /usr/local/bin/
+    cp /tmp/prometheus-$${PROM_VERSION}.linux-amd64/promtool /usr/local/bin/
+    cp -r /tmp/prometheus-$${PROM_VERSION}.linux-amd64/consoles /etc/prometheus/
+    cp -r /tmp/prometheus-$${PROM_VERSION}.linux-amd64/console_libraries /etc/prometheus/
     chown -R prometheus:prometheus /etc/prometheus /var/lib/prometheus
 
     cat >/etc/prometheus/prometheus.yml <<'PYML'
@@ -272,9 +272,9 @@ locals {
     PSVC
 
     # Node Exporter
-    curl -L -o /tmp/node_exporter.tar.gz "https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
+    curl -L -o /tmp/node_exporter.tar.gz "https://github.com/prometheus/node_exporter/releases/download/v$${NODE_EXPORTER_VERSION}/node_exporter-$${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
     tar -xzf /tmp/node_exporter.tar.gz -C /tmp
-    cp /tmp/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter /usr/local/bin/
+    cp /tmp/node_exporter-$${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter /usr/local/bin/
     useradd --no-create-home --shell /bin/false node_exporter || true
 
     cat >/etc/systemd/system/node_exporter.service <<'NESVC'
