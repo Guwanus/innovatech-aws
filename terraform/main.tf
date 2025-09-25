@@ -232,11 +232,15 @@ DB_PASS=${var.db_password}
 EOF
 chmod 600 /etc/app/.env
 
+# Veilig AZ/host ophalen (faalt niet als curl niet werkt)
+AZ="$(curl -sf http://169.254.169.254/latest/meta-data/placement/availability-zone || echo unknown)"
+HOST="$(hostname)"
+
 # Demo HTML
 cat >/usr/share/nginx/html/index.html <<HTML
 <html><body style="font-family: Arial; margin: 2rem;">
-  <h1>${var.name} - Hello from $(hostname)</h1>
-  <p>AZ: $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>
+  <h1>${var.name} - Hello from ${HOST}</h1>
+  <p>AZ: ${AZ}</p>
   <h3>Database connection (for app):</h3>
   <pre>/etc/app/.env</pre>
 </body></html>
@@ -244,9 +248,7 @@ HTML
 
 systemctl enable --now nginx
 
-# -----------------------------
-# Install Prometheus (systemd)
-# -----------------------------
+# ------- Prometheus (zoals jij 'm had) -------
 useradd --no-create-home --shell /usr/sbin/nologin prometheus || true
 mkdir -p /etc/prometheus /var/lib/prometheus
 
@@ -359,7 +361,17 @@ resource "aws_autoscaling_group" "web" {
   lifecycle {
     create_before_destroy = true
   }
+
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 90
+      instance_warmup        = 60
+    }
+    triggers = ["launch_template"]
+  }
 }
+
 
 # Target tracking scaling policies
 resource "aws_autoscaling_policy" "cpu" {
