@@ -17,7 +17,7 @@ jobs:
       TF_VAR_region:      ${{ secrets.AWS_REGION }}
       # Let op: GEEN AWS_PROFILE zetten
 
-    # Draai Terraform in de map waar je .tf-bestanden staan
+  # Draai Terraform in de map waar je .tf-bestanden staan
     defaults:
       run:
         shell: bash
